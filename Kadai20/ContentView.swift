@@ -9,80 +9,182 @@ import SwiftUI
 import CoreData
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
+    private enum Mode {
+        case add, edit
+    }
 
+    private let dataStore = ItemDataStore()
+
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.managedObjectContext) private var viewContext
     @FetchRequest(
         sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
         animation: .default)
     private var items: FetchedResults<Item>
+    @State private var isShowAddEditView = false
+    @State private var name: String = ""
+    @State private var mode: Mode = .add
+    @State private var editId: UUID?
 
     var body: some View {
         NavigationView {
             List {
                 ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
+                    HStack {
+                        ItemView(item: item)
+                            .onTapGesture {
+                                item.isChecked.toggle()
+                            }
+
+                        Spacer()
+
+                        Label("", systemImage: "info.circle")
+                            .onTapGesture {
+                                mode = .edit
+                                editId = item.id
+                                name = item.name ?? ""
+                                isShowAddEditView = true
+                            }
                     }
                 }
-                .onDelete(perform: deleteItems)
+                .onDelete { dataStore.delete(items: items, offset: $0) }
             }
+            .listStyle(.plain)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
+                    Button(action: {
+                        mode = .add
+                        name = ""
+                        isShowAddEditView = true
+                    }, label: { Image(systemName: "plus") })
                 }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+            }
+        }
+        .fullScreenCover(isPresented: $isShowAddEditView) {
+            AddOrEditItemView(
+                name: $name,
+                didSave: { addOrEditName in
+                    isShowAddEditView = false
+                    switch mode {
+                    case .add:
+                        dataStore.didAdd(addName: addOrEditName)
+                    case .edit:
+                        dataStore.didEditName(items: items, editId: editId, editName: addOrEditName)
+                    }
+                },
+                didCancel: { isShowAddEditView = false })
+        }
+        .onChange(of: scenePhase) { newScenePhase in
+            switch newScenePhase {
+            case .inactive:
+                if viewContext.hasChanges {
+                    do {
+                        try dataStore.save()
+                    } catch {
+                        print("書き込みエラー\n\(error.localizedDescription)")
                     }
                 }
-            }
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+            default: break
             }
         }
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
+struct ItemDataStore {
+    private let context = PersistenceController.shared.container.viewContext
+
+    func didAdd(addName: String) {
+        let newItem = Item(context: context)
+        newItem.timestamp = Date()
+        newItem.id = UUID()
+        newItem.name = addName
+        newItem.isChecked = false
+    }
+
+    func didEditName(items: FetchedResults<Item>, editId: UUID?, editName: String) {
+        guard let targetIndex = items.firstIndex(where: { $0.id == editId }) else { return }
+        items[targetIndex].name = editName
+    }
+
+    func delete(items: FetchedResults<Item>, offset: IndexSet) {
+        let targetItem = offset.map { items[$0] }.first ?? .init()
+        context.delete(targetItem)
+    }
+
+    func save() throws {
+        do {
+            try context.save()
+        } catch {
+            throw error
+        }
+    }
+}
+
+struct AddOrEditItemView: View {
+    @Binding var name: String
+    let didSave: (String) -> Void
+    let didCancel: () -> Void
+
+    var body: some View {
+        NavigationView {
+            HStack(spacing: 30) {
+                Text("名前")
+                    .padding(.leading)
+
+                TextField("", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.trailing)
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        didCancel()
+                    }
+                }
+
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") {
+                        didSave(name)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ItemView: View {
+    @ObservedObject var item: Item
+    private let checkMark = Image(systemName: "checkmark")
+
+    var body: some View {
+        HStack {
+            if item.isChecked {
+                checkMark.foregroundColor(.orange)
+            } else {
+                checkMark.hidden()
+            }
+
+            Text(item.name ?? "")
+        }
+    }
+}
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+        ContentView()
+            .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+    }
+}
+
+struct AddOrEditItemView_Previews: PreviewProvider {
+    static var previews: some View {
+        AddOrEditItemView(name: .constant("みかん"), didSave: { _ in }, didCancel: {})
+    }
+}
+
+struct ItemView_Previews: PreviewProvider {
+    static var previews: some View {
+        ItemView(item: .init())
+            .environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
     }
 }
